@@ -1,0 +1,26 @@
+{
+  "name": "pi-ext-pomo",
+  "version": "0.1.0",
+  "description": "Pomodoro + eye/neck/waist health reminders for pi coding agent",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pomodoro",
+    "health",
+    "productivity"
+  ],
+  "author": "bruce.y",
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rnoldo/pi-ext-pomo.git"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  }
+}
