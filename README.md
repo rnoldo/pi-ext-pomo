@@ -10,6 +10,7 @@ Pomodoro + wellness reminders (eyes, posture) extension for [pi coding agent](ht
 - Eye reminder (default: every 20 minutes)
 - Posture reminder (default: every 50 minutes)
 - Footer countdown status
+- Full-screen break overlay countdown on macOS (auto-close; press Esc to exit)
 - Persistent session state (restores after restart)
 
 ## Install
@@ -30,12 +31,13 @@ pi install https://github.com/rnoldo/pi-ext-pomo
 
 Run these commands in pi:
 
-- `/pomo start` (default 25/5)
+- `/pomo start` (default 25/3)
 - `/pomo start 30/5`
 - `/pomo pause`
 - `/pomo resume`
 - `/pomo stop`
 - `/pomo status`
+- `/pomo overlay` preview a 20-second full-screen break overlay (macOS)
 - `/eye` trigger eye reminder now
 - `/posture` trigger posture reminder now
 

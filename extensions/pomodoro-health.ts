@@ -1,4 +1,8 @@
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 type Phase = "focus" | "break" | "longBreak";
 type RunState = "idle" | "running" | "paused";
@@ -23,14 +27,16 @@ const STATUS_KEY = "pomodoro-health";
 const EYE_REMINDER_MS = 20 * 60 * 1000;
 const POSTURE_REMINDER_MS = 50 * 60 * 1000;
 const TICK_MS = 1000;
+const BREAK_OVERLAY_ENABLED = true;
+const BREAK_OVERLAY_MAX_SECONDS = 2 * 60 * 60;
 
 function defaultState(): PomodoroState {
 	return {
 		runState: "idle",
 		phase: "focus",
 		focusMinutes: 25,
-		breakMinutes: 5,
-		longBreakMinutes: 15,
+		breakMinutes: 3,
+		longBreakMinutes: 3,
 		longBreakEvery: 4,
 		completedFocusCount: 0,
 	};
@@ -59,9 +65,209 @@ function fmt(seconds: number): string {
 	return `${mm}:${ss}`;
 }
 
+const BREAK_OVERLAY_JXA_SCRIPT = `
+ObjC.import('Cocoa')
+
+function fmt(seconds) {
+	const safe = Math.max(0, seconds)
+	const mm = String(Math.floor(safe / 60)).padStart(2, '0')
+	const ss = String(Math.floor(safe % 60)).padStart(2, '0')
+	return mm + ':' + ss
+}
+
+const env = $.NSProcessInfo.processInfo.environment
+const envSeconds = env.objectForKey('PI_BREAK_OVERLAY_SECONDS')
+const rawSeconds = envSeconds ? ObjC.unwrap(envSeconds) : '300'
+const duration = Math.max(1, parseInt(rawSeconds, 10) || 300)
+
+ObjC.registerSubclass({
+	name: 'PomoOverlayWindow',
+	superclass: 'NSWindow',
+	methods: {
+		'canBecomeKeyWindow': {
+			types: ['B', []],
+			implementation: function () {
+				return true
+			}
+		},
+		'canBecomeMainWindow': {
+			types: ['B', []],
+			implementation: function () {
+				return true
+			}
+		}
+	}
+})
+
+ObjC.registerSubclass({
+	name: 'PomoEscapeView',
+	superclass: 'NSView',
+	methods: {
+		'acceptsFirstResponder': {
+			types: ['B', []],
+			implementation: function () {
+				return true
+			}
+		},
+		'becomeFirstResponder': {
+			types: ['B', []],
+			implementation: function () {
+				return true
+			}
+		},
+		'cancelOperation:': {
+			types: ['v', ['@']],
+			implementation: function (_sender) {
+				$.NSApplication.sharedApplication.terminate(null)
+			}
+		},
+		'keyDown:': {
+			types: ['v', ['@']],
+			implementation: function (event) {
+				try {
+					const keyCode = typeof event.keyCode === 'function' ? Number(event.keyCode()) : Number(event.keyCode)
+					if (keyCode === 53) {
+						$.NSApplication.sharedApplication.terminate(null)
+						return
+					}
+				} catch (_) {}
+			}
+		}
+	}
+})
+
+const app = $.NSApplication.sharedApplication
+app.setActivationPolicy($.NSApplicationActivationPolicyRegular)
+
+const windows = []
+const timerLabels = []
+const responderViews = []
+let remaining = duration
+
+const screens = $.NSScreen.screens
+const screenCount = screens.count
+
+for (let i = 0; i < screenCount; i++) {
+	const screen = screens.objectAtIndex(i)
+	const frame = screen.frame
+	const window = $.PomoOverlayWindow.alloc.initWithContentRectStyleMaskBackingDefer(
+		frame,
+		$.NSWindowStyleMaskBorderless,
+		$.NSBackingStoreBuffered,
+		false
+	)
+
+	window.setLevel($.NSScreenSaverWindowLevel)
+	window.setOpaque(false)
+	window.setBackgroundColor($.NSColor.colorWithCalibratedWhiteAlpha(0.0, 0.9))
+	window.setIgnoresMouseEvents(false)
+	window.setCollectionBehavior(
+		$.NSWindowCollectionBehaviorCanJoinAllSpaces |
+		$.NSWindowCollectionBehaviorFullScreenAuxiliary |
+		$.NSWindowCollectionBehaviorStationary |
+		$.NSWindowCollectionBehaviorIgnoresCycle
+	)
+	window.makeKeyAndOrderFront(null)
+	window.orderFront(null)
+
+	const content = window.contentView
+	const width = frame.size.width
+	const midY = frame.size.height / 2
+	const autoMask = $.NSViewWidthSizable | $.NSViewMinYMargin | $.NSViewMaxYMargin
+
+	const escapeView = $.PomoEscapeView.alloc.initWithFrame(content.bounds)
+	escapeView.setAutoresizingMask($.NSViewWidthSizable | $.NSViewHeightSizable)
+	content.addSubview(escapeView)
+	responderViews.push(escapeView)
+
+	const title = $.NSTextField.labelWithString('🍅 休息时间')
+	title.setFont($.NSFont.systemFontOfSizeWeight(42, $.NSFontWeightBold))
+	title.setTextColor($.NSColor.whiteColor)
+	title.setAlignment($.NSTextAlignmentCenter)
+	title.setFrame($.NSMakeRect(0, midY + 40, width, 56))
+	title.setAutoresizingMask(autoMask)
+	content.addSubview(title)
+
+	const timerLabel = $.NSTextField.labelWithString('')
+	timerLabel.setFont($.NSFont.monospacedDigitSystemFontOfSizeWeight(72, $.NSFontWeightSemibold))
+	timerLabel.setTextColor($.NSColor.whiteColor)
+	timerLabel.setAlignment($.NSTextAlignmentCenter)
+	timerLabel.setFrame($.NSMakeRect(0, midY - 40, width, 88))
+	timerLabel.setAutoresizingMask(autoMask)
+	content.addSubview(timerLabel)
+	timerLabels.push(timerLabel)
+
+	const hint = $.NSTextField.labelWithString('请离开屏幕，活动颈肩和腰背（按 Esc 退出）')
+	hint.setFont($.NSFont.systemFontOfSizeWeight(24, $.NSFontWeightRegular))
+	hint.setTextColor($.NSColor.colorWithCalibratedWhiteAlpha(1.0, 0.9))
+	hint.setAlignment($.NSTextAlignmentCenter)
+	hint.setFrame($.NSMakeRect(0, midY - 100, width, 36))
+	hint.setAutoresizingMask(autoMask)
+	content.addSubview(hint)
+
+	window.makeFirstResponder(escapeView)
+	window.setInitialFirstResponder(escapeView)
+	windows.push(window)
+}
+
+function updateLabels() {
+	const text = fmt(remaining)
+	for (let i = 0; i < timerLabels.length; i++) {
+		timerLabels[i].setStringValue(text)
+	}
+}
+
+function focusResponderViews() {
+	for (let i = 0; i < windows.length; i++) {
+		windows[i].makeKeyAndOrderFront(null)
+		windows[i].makeFirstResponder(responderViews[i])
+	}
+}
+
+updateLabels()
+app.activateIgnoringOtherApps(true)
+focusResponderViews()
+
+$.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(0.2, true, () => {
+	focusResponderViews()
+})
+
+$.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(1.0, true, () => {
+	remaining -= 1
+	if (remaining <= 0) {
+		app.terminate(null)
+		return
+	}
+	updateLabels()
+})
+
+app.run
+`;
+
+const BREAK_OVERLAY_SCRIPT_NAME = "break-overlay.jxa.js";
+const BREAK_OVERLAY_DIR_PREFIX = "pi-pomo-overlay-";
+const BREAK_OVERLAY_MIN_SECONDS = 10;
+const BREAK_OVERLAY_DEFAULT_SECONDS = 300;
+
+const BREAK_OVERLAY_CONTEXT = {
+	cachedPath: undefined as string | undefined,
+};
+
+function ensureBreakOverlayScriptPath(): string {
+	const cached = BREAK_OVERLAY_CONTEXT.cachedPath;
+	if (cached && existsSync(cached)) return cached;
+
+	const dir = mkdtempSync(join(tmpdir(), BREAK_OVERLAY_DIR_PREFIX));
+	const scriptPath = join(dir, BREAK_OVERLAY_SCRIPT_NAME);
+	writeFileSync(scriptPath, BREAK_OVERLAY_JXA_SCRIPT, "utf8");
+	BREAK_OVERLAY_CONTEXT.cachedPath = scriptPath;
+	return scriptPath;
+}
+
 export default function pomodoroHealthExtension(pi: ExtensionAPI) {
 	let state: PomodoroState = defaultState();
 	let timer: NodeJS.Timeout | undefined;
+	let overlayPid: number | undefined;
 
 	function clearTimer() {
 		if (timer) {
@@ -99,11 +305,54 @@ export default function pomodoroHealthExtension(pi: ExtensionAPI) {
 		ctx.ui.notify(`${title}：${message}`, level);
 	}
 
+	function dismissBreakOverlay() {
+		if (!overlayPid) return;
+		try {
+			process.kill(overlayPid, "SIGTERM");
+		} catch {
+			// ignore
+		}
+		overlayPid = undefined;
+	}
+
+	function showBreakOverlay(ctx: ExtensionContext, _phase: "break" | "longBreak", durationSeconds: number) {
+		if (!BREAK_OVERLAY_ENABLED) return;
+		if (process.platform !== "darwin") return;
+
+		const timeoutSeconds = Math.max(BREAK_OVERLAY_MIN_SECONDS, Math.min(BREAK_OVERLAY_MAX_SECONDS, Math.floor(durationSeconds)));
+		const scriptPath = ensureBreakOverlayScriptPath();
+
+		dismissBreakOverlay();
+
+		try {
+			const child = spawn("osascript", ["-l", "JavaScript", scriptPath], {
+				detached: true,
+				stdio: "ignore",
+				env: {
+					...process.env,
+					PI_BREAK_OVERLAY_SECONDS: String(timeoutSeconds || BREAK_OVERLAY_DEFAULT_SECONDS),
+				},
+			});
+			overlayPid = child.pid;
+			child.on("exit", () => {
+				if (overlayPid === child.pid) {
+					overlayPid = undefined;
+				}
+			});
+			child.unref();
+		} catch {
+			notify(ctx, "⚠️ 休息提醒失败", "无法启动全屏休息蒙层，请检查 macOS 自动化权限", "warning");
+		}
+	}
+
 	function transitionPhase(ctx: ExtensionContext) {
+		let enteredBreak = false;
+
 		if (state.phase === "focus") {
 			state.completedFocusCount += 1;
 			const isLongBreak = state.completedFocusCount % state.longBreakEvery === 0;
 			state.phase = isLongBreak ? "longBreak" : "break";
+			enteredBreak = true;
 			notify(ctx, "⏰ 番茄结束", "起来活动肩颈和腰背，离屏休息一下", "warning");
 		} else {
 			state.phase = "focus";
@@ -115,6 +364,10 @@ export default function pomodoroHealthExtension(pi: ExtensionAPI) {
 		state.remainingSeconds = duration;
 		persistState();
 		setStatus(ctx);
+
+		if (enteredBreak) {
+			showBreakOverlay(ctx, state.phase === "longBreak" ? "longBreak" : "break", duration);
+		}
 	}
 
 	function runHealthReminders(ctx: ExtensionContext) {
@@ -175,6 +428,7 @@ export default function pomodoroHealthExtension(pi: ExtensionAPI) {
 	}
 
 	function startCommand(ctx: ExtensionCommandContext, maybeDurations?: string) {
+		dismissBreakOverlay();
 		const next = defaultState();
 		if (maybeDurations) {
 			const match = maybeDurations.trim().match(/^(\d{1,2})\s*\/\s*(\d{1,2})$/);
@@ -202,15 +456,17 @@ export default function pomodoroHealthExtension(pi: ExtensionAPI) {
 
 	pi.on("session_switch", async (_event, ctx) => {
 		clearTimer();
+		dismissBreakOverlay();
 		hydrateFromSession(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
 		clearTimer();
+		dismissBreakOverlay();
 	});
 
 	pi.registerCommand("pomo", {
-		description: "Pomodoro: /pomo start [25/5] | pause | resume | stop | status",
+		description: "Pomodoro: /pomo start [25/3] | pause | resume | stop | status | overlay",
 		handler: async (args, ctx) => {
 			const raw = (args ?? "").trim();
 			const [action, ...rest] = raw.split(/\s+/).filter(Boolean);
@@ -232,6 +488,7 @@ export default function pomodoroHealthExtension(pi: ExtensionAPI) {
 					}
 					state.phaseEndsAt = undefined;
 					persistState();
+					dismissBreakOverlay();
 					setStatus(ctx);
 					notify(ctx, "⏸ 已暂停", "番茄钟已暂停", "info");
 					return;
@@ -256,8 +513,16 @@ export default function pomodoroHealthExtension(pi: ExtensionAPI) {
 					state.phaseEndsAt = undefined;
 					state.remainingSeconds = undefined;
 					persistState();
+					dismissBreakOverlay();
 					setStatus(ctx);
 					notify(ctx, "🛑 已停止", "番茄钟已停止", "info");
+					return;
+				}
+				case "overlay": {
+					const previewPhase: "break" | "longBreak" = state.phase === "longBreak" ? "longBreak" : "break";
+					const previewSeconds = 20;
+					showBreakOverlay(ctx, previewPhase, previewSeconds);
+					notify(ctx, "🧪 预览提醒", "已启动 20 秒测试蒙层", "info");
 					return;
 				}
 				case "status":
@@ -276,7 +541,7 @@ export default function pomodoroHealthExtension(pi: ExtensionAPI) {
 					return;
 				}
 				default: {
-					notify(ctx, "⚠️ 用法", "/pomo start [25/5] | pause | resume | stop | status", "warning");
+					notify(ctx, "⚠️ 用法", "/pomo start [25/3] | pause | resume | stop | status | overlay", "warning");
 				}
 			}
 		},

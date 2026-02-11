@@ -10,6 +10,7 @@ English README: [README.md](./README.md)
 - 眼睛提醒：默认每 20 分钟
 - 姿势提醒：默认每 50 分钟
 - Footer 倒计时状态栏
+- macOS 休息阶段全屏蒙层倒计时（自动关闭，按 Esc 可退出）
 - 会话状态持久化（重启后可恢复）
 
 ## 安装
@@ -30,12 +31,13 @@ pi install https://github.com/rnoldo/pi-ext-pomo
 
 在 pi 里输入：
 
-- `/pomo start`（默认 25/5）
+- `/pomo start`（默认 25/3）
 - `/pomo start 30/5`
 - `/pomo pause`
 - `/pomo resume`
 - `/pomo stop`
 - `/pomo status`
+- `/pomo overlay` 预览 20 秒休息全屏蒙层（macOS）
 - `/eye` 立即眼睛提醒
 - `/posture` 立即姿势提醒
 
