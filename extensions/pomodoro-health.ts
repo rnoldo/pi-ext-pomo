@@ -68,6 +68,29 @@ function fmt(seconds: number): string {
 const BREAK_OVERLAY_JXA_SCRIPT = `
 ObjC.import('Cocoa')
 
+// --------------------------------------------------------
+// 常量定义 (使用确定的数值，避免 JXA 属性解析失败)
+// --------------------------------------------------------
+
+// NSWindowCollectionBehavior
+// CanJoinAllSpaces(1<<0) + Stationary(1<<4) + IgnoresCycle(1<<6) + FullScreenAuxiliary(1<<8)
+// 1 + 16 + 64 + 256 = 337
+const COLLECTION_BEHAVIOR = 337 
+
+// NSWindowStyleMask: Borderless(0)
+const STYLE_MASK_BORDERLESS = 0
+
+// NSBackingStoreType: Buffered(2)
+const BACKING_STORE_BUFFERED = 2
+
+// NSWindowLevel: ScreenSaver(2500)
+// 确保永远置顶覆盖
+const WINDOW_LEVEL = 2500
+
+// --------------------------------------------------------
+// 辅助函数
+// --------------------------------------------------------
+
 function fmt(seconds) {
 	const safe = Math.max(0, seconds)
 	const mm = String(Math.floor(safe / 60)).padStart(2, '0')
@@ -75,10 +98,9 @@ function fmt(seconds) {
 	return mm + ':' + ss
 }
 
-const env = $.NSProcessInfo.processInfo.environment
-const envSeconds = env.objectForKey('PI_BREAK_OVERLAY_SECONDS')
-const rawSeconds = envSeconds ? ObjC.unwrap(envSeconds) : '300'
-const duration = Math.max(1, parseInt(rawSeconds, 10) || 300)
+// --------------------------------------------------------
+// 类定义
+// --------------------------------------------------------
 
 ObjC.registerSubclass({
 	name: 'PomoOverlayWindow',
@@ -86,15 +108,11 @@ ObjC.registerSubclass({
 	methods: {
 		'canBecomeKeyWindow': {
 			types: ['B', []],
-			implementation: function () {
-				return true
-			}
+			implementation: function () { return true }
 		},
 		'canBecomeMainWindow': {
 			types: ['B', []],
-			implementation: function () {
-				return true
-			}
+			implementation: function () { return true }
 		}
 	}
 })
@@ -105,27 +123,18 @@ ObjC.registerSubclass({
 	methods: {
 		'acceptsFirstResponder': {
 			types: ['B', []],
-			implementation: function () {
-				return true
-			}
+			implementation: function () { return true }
 		},
 		'becomeFirstResponder': {
 			types: ['B', []],
-			implementation: function () {
-				return true
-			}
-		},
-		'cancelOperation:': {
-			types: ['v', ['@']],
-			implementation: function (_sender) {
-				$.NSApplication.sharedApplication.terminate(null)
-			}
+			implementation: function () { return true }
 		},
 		'keyDown:': {
 			types: ['v', ['@']],
 			implementation: function (event) {
 				try {
 					const keyCode = typeof event.keyCode === 'function' ? Number(event.keyCode()) : Number(event.keyCode)
+					// ESC (53)
 					if (keyCode === 53) {
 						$.NSApplication.sharedApplication.terminate(null)
 						return
@@ -136,50 +145,64 @@ ObjC.registerSubclass({
 	}
 })
 
+// --------------------------------------------------------
+// 主逻辑
+// --------------------------------------------------------
+
 const app = $.NSApplication.sharedApplication
-app.setActivationPolicy($.NSApplicationActivationPolicyRegular)
+// 使用 Accessory (1) 模式，使应用无 Dock 图标，且更容易在所有 Spaces (包括全屏应用) 中显示
+// Regular = 0, Accessory = 1, Prohibited = 2
+app.setActivationPolicy(1)
+
+const env = $.NSProcessInfo.processInfo.environment
+const envSeconds = env.objectForKey('PI_BREAK_OVERLAY_SECONDS')
+const rawSeconds = envSeconds ? ObjC.unwrap(envSeconds) : '300'
+let remaining = Math.max(1, parseInt(rawSeconds, 10) || 300)
 
 const windows = []
 const timerLabels = []
 const responderViews = []
-let remaining = duration
 
 const screens = $.NSScreen.screens
 const screenCount = screens.count
 
+// 为每个屏幕创建一个遮罩窗口
 for (let i = 0; i < screenCount; i++) {
 	const screen = screens.objectAtIndex(i)
 	const frame = screen.frame
+	
 	const window = $.PomoOverlayWindow.alloc.initWithContentRectStyleMaskBackingDefer(
 		frame,
-		$.NSWindowStyleMaskBorderless,
-		$.NSBackingStoreBuffered,
+		STYLE_MASK_BORDERLESS,
+		BACKING_STORE_BUFFERED,
 		false
 	)
 
-	window.setLevel($.NSScreenSaverWindowLevel)
+	// 设置窗口层级为屏幕保护程序级 (2500)，确保覆盖菜单栏、Dock 和其他全屏窗口
+	window.setLevel(WINDOW_LEVEL)
 	window.setOpaque(false)
 	window.setBackgroundColor($.NSColor.colorWithCalibratedWhiteAlpha(0.0, 0.9))
 	window.setIgnoresMouseEvents(false)
-	window.setCollectionBehavior(
-		$.NSWindowCollectionBehaviorCanJoinAllSpaces |
-		$.NSWindowCollectionBehaviorFullScreenAuxiliary |
-		$.NSWindowCollectionBehaviorStationary |
-		$.NSWindowCollectionBehaviorIgnoresCycle
-	)
-	window.makeKeyAndOrderFront(null)
-	window.orderFront(null)
+	
+	// 确保应用失去焦点时窗口不隐藏
+	window.setHidesOnDeactivate(false)
+	
+	// 设置行为：全屏辅助、加入所有 Space、固定位置、忽略循环
+	window.setCollectionBehavior(COLLECTION_BEHAVIOR)
 
+	// 布局内容
 	const content = window.contentView
 	const width = frame.size.width
 	const midY = frame.size.height / 2
 	const autoMask = $.NSViewWidthSizable | $.NSViewMinYMargin | $.NSViewMaxYMargin
 
+	// 1. 响应 ESC 的视图 (全屏透明)
 	const escapeView = $.PomoEscapeView.alloc.initWithFrame(content.bounds)
 	escapeView.setAutoresizingMask($.NSViewWidthSizable | $.NSViewHeightSizable)
 	content.addSubview(escapeView)
 	responderViews.push(escapeView)
 
+	// 2. 标题
 	const title = $.NSTextField.labelWithString('🍅 休息时间')
 	title.setFont($.NSFont.systemFontOfSizeWeight(42, $.NSFontWeightBold))
 	title.setTextColor($.NSColor.whiteColor)
@@ -188,6 +211,7 @@ for (let i = 0; i < screenCount; i++) {
 	title.setAutoresizingMask(autoMask)
 	content.addSubview(title)
 
+	// 3. 倒计时
 	const timerLabel = $.NSTextField.labelWithString('')
 	timerLabel.setFont($.NSFont.monospacedDigitSystemFontOfSizeWeight(72, $.NSFontWeightSemibold))
 	timerLabel.setTextColor($.NSColor.whiteColor)
@@ -197,6 +221,7 @@ for (let i = 0; i < screenCount; i++) {
 	content.addSubview(timerLabel)
 	timerLabels.push(timerLabel)
 
+	// 4. 提示文字
 	const hint = $.NSTextField.labelWithString('请离开屏幕，活动颈肩和腰背（按 Esc 退出）')
 	hint.setFont($.NSFont.systemFontOfSizeWeight(24, $.NSFontWeightRegular))
 	hint.setTextColor($.NSColor.colorWithCalibratedWhiteAlpha(1.0, 0.9))
@@ -205,8 +230,6 @@ for (let i = 0; i < screenCount; i++) {
 	hint.setAutoresizingMask(autoMask)
 	content.addSubview(hint)
 
-	window.makeFirstResponder(escapeView)
-	window.setInitialFirstResponder(escapeView)
 	windows.push(window)
 }
 
@@ -217,21 +240,36 @@ function updateLabels() {
 	}
 }
 
-function focusResponderViews() {
+function focusWindows() {
+	// 强制应用前台
+	app.activateIgnoringOtherApps(true)
+	
 	for (let i = 0; i < windows.length; i++) {
-		windows[i].makeKeyAndOrderFront(null)
-		windows[i].makeFirstResponder(responderViews[i])
+		const win = windows[i]
+		// 再次确保层级正确
+		win.setLevel(WINDOW_LEVEL)
+		
+		if (i === 0) {
+			// 主窗口：获取焦点，响应键盘事件
+			win.makeKeyAndOrderFront(null)
+			win.makeFirstResponder(responderViews[i])
+		} else {
+			// 副窗口：仅强制显示，不抢夺焦点
+			win.orderFrontRegardless()
+		}
 	}
 }
 
+// 初始化显示
 updateLabels()
-app.activateIgnoringOtherApps(true)
-focusResponderViews()
+focusWindows()
 
-$.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(0.2, true, () => {
-	focusResponderViews()
+// 定时器：每 0.5 秒维持一次窗口状态 (避免过于频繁导致闪烁)
+$.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(0.5, true, () => {
+	focusWindows()
 })
 
+// 定时器：倒计时
 $.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(1.0, true, () => {
 	remaining -= 1
 	if (remaining <= 0) {
